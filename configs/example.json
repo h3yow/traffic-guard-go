@@ -1,0 +1,12 @@
+{
+  "rate_limit": {
+    "rate_per_second": 5,
+    "burst": 2,
+    "global_max_in_flight": 10
+  },
+  "circuit": {
+    "failure_threshold": 3,
+    "open_cooldown_ms": 3000,
+    "probe_timeout_ms": 500
+  }
+}
