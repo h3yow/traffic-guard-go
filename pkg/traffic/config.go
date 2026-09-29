@@ -25,6 +25,30 @@ type Config struct {
 	OpenCooldownMS int `json:"open_cooldown_ms"`
 	// UpstreamTimeoutMS 上游调用超时，缺省 2000ms，必须 > 0。
 	UpstreamTimeoutMS int `json:"upstream_timeout_ms"`
+	// EndpointCosts 入口成本声明：endpoint 标识 -> 单次请求消耗的成本。
+	// 缺省 nil（全部入口按成本 1 计）。键必须非空，值必须 > 0；
+	// 未声明的入口（包括请求未携带 endpoint 标识）成本一律按 1 计算。
+	// 成本会同时计入客户端/分组的速率窗、突发窗与全局在途总量。
+	EndpointCosts map[string]int `json:"endpoint_costs,omitempty"`
+	// Groups 分组（租户）维度额度。缺省 nil（不启用分组层）。
+	// 键为分组标识，必须非空；每个分组有独立的速率/突发/在途上限。
+	Groups map[string]GroupConfig `json:"groups,omitempty"`
+	// ClientGroups 客户端 -> 分组 的归属映射。键/值都必须非空。
+	// 解析不到分组（未配置或指向未知分组）的请求不经过分组层核算，
+	// 仍正常经过客户端层与全局层；配置指向未知分组不视为非法，
+	// 以允许分组配置与映射分先后上线。
+	ClientGroups map[string]string `json:"client_groups,omitempty"`
+}
+
+// GroupConfig 单个分组（租户）的额度上限。
+// 窗口长度与客户端层一致：速率窗固定 1s，突发窗取全局 BurstWindow。
+type GroupConfig struct {
+	// RatePerSec 分组每速率窗（1s）放行的成本上限。必须 > 0。
+	RatePerSec int `json:"rate_per_sec"`
+	// Burst 分组每突发窗放行的成本上限。必须 > 0 且 <= RatePerSec。
+	Burst int `json:"burst"`
+	// InFlight 分组同时在途的成本总量上限。必须 > 0。
+	InFlight int `json:"in_flight"`
 }
 
 // DefaultConfig 返回带有确定缺省语义的配置。
@@ -70,10 +94,74 @@ func (c Config) Validate() error {
 	if c.UpstreamTimeoutMS <= 0 {
 		problems = append(problems, "upstream_timeout_ms must be > 0")
 	}
+	for ep, cost := range c.EndpointCosts {
+		if ep == "" {
+			problems = append(problems, "endpoint_costs contains empty endpoint key")
+		}
+		if cost <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"endpoint_costs[%q] must be > 0", ep))
+		}
+	}
+	for name, g := range c.Groups {
+		if name == "" {
+			problems = append(problems, "groups contains empty group key")
+		}
+		if g.RatePerSec <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"groups[%q].rate_per_sec must be > 0", name))
+		}
+		if g.Burst <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"groups[%q].burst must be > 0", name))
+		}
+		if g.RatePerSec > 0 && g.Burst > g.RatePerSec {
+			problems = append(problems, fmt.Sprintf(
+				"groups[%q].burst (%d) must be <= rate_per_sec (%d)",
+				name, g.Burst, g.RatePerSec))
+		}
+		if g.InFlight <= 0 {
+			problems = append(problems, fmt.Sprintf(
+				"groups[%q].in_flight must be > 0", name))
+		}
+	}
+	for client, group := range c.ClientGroups {
+		if client == "" {
+			problems = append(problems, "client_groups contains empty client key")
+		}
+		if group == "" {
+			problems = append(problems, fmt.Sprintf(
+				"client_groups[%q] must reference a non-empty group", client))
+		}
+	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid traffic config: %v", problems)
 	}
 	return nil
+}
+
+// CostOf 返回入口 endpoint 一次请求消耗的成本；
+// 未声明（或 endpoint 为空）时按缺省成本 1 计。
+func (c Config) CostOf(endpoint string) int {
+	if endpoint != "" {
+		if cost, ok := c.EndpointCosts[endpoint]; ok {
+			return cost
+		}
+	}
+	return 1
+}
+
+// GroupOf 解析 client 归属的分组；返回 "" 表示该客户端不经过分组层
+// （未配置映射，或映射指向一个不存在的分组）。
+func (c Config) GroupOf(client string) string {
+	name, ok := c.ClientGroups[client]
+	if !ok {
+		return ""
+	}
+	if _, ok := c.Groups[name]; !ok {
+		return ""
+	}
+	return name
 }
 
 // BurstWindow 返回突发窗时长。

@@ -142,6 +142,17 @@ func (b *Breaker) toOpenLocked(now time.Time) {
 	b.probeInFlight = false
 }
 
+// UpdateConfig 在运行期更新阈值与冷却时长。
+// 语义：只影响后续判定——阈值用于之后的连续失败计数比较；
+// 若当前处于 open，冷却到期时刻保持不变（用新冷却解释剩余时间），
+// 即换配不重置 open 起点、也不主动打开/关闭熔断器。
+func (b *Breaker) UpdateConfig(threshold int, cooldown time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.threshold = threshold
+	b.cooldown = cooldown
+}
+
 // State 返回当前状态（不触发状态迁移）。
 func (b *Breaker) State() BreakerState {
 	b.mu.Lock()

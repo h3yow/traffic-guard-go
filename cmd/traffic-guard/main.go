@@ -74,7 +74,18 @@ func main() {
 		if id == "" {
 			id = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
-		res := guard.Serve(r.Context(), client, id)
+		// 入口标识：优先显式头，缺省用 URL 路径；成本由 EndpointCosts 声明，
+		// 未声明的路径按成本 1 计。分组优先显式头，否则按 client_groups 解析。
+		info := traffic.RequestInfo{
+			Client:   client,
+			ID:       id,
+			Endpoint: r.Header.Get("X-Endpoint-ID"),
+			Group:    r.Header.Get("X-Group-ID"),
+		}
+		if info.Endpoint == "" {
+			info.Endpoint = r.URL.Path
+		}
+		res := guard.ServeRequest(r.Context(), info)
 		switch {
 		case res.Reason == traffic.ReasonClosing:
 			w.Header().Set("X-Deny-Reason", string(res.Reason))
@@ -84,7 +95,11 @@ func main() {
 			http.Error(w, "circuit open", http.StatusServiceUnavailable)
 		case res.Reason == traffic.ReasonBurstExceeded ||
 			res.Reason == traffic.ReasonRateExceeded ||
-			res.Reason == traffic.ReasonGlobalExceeded:
+			res.Reason == traffic.ReasonGlobalExceeded ||
+			res.Reason == traffic.ReasonGroupBurst ||
+			res.Reason == traffic.ReasonGroupRate ||
+			res.Reason == traffic.ReasonGroupInFlight:
+			// X-Deny-Reason 精确区分是客户端层、分组层还是全局层触顶。
 			w.Header().Set("X-Deny-Reason", string(res.Reason))
 			http.Error(w, "rate limited: "+string(res.Reason), http.StatusTooManyRequests)
 		case res.Upstream != traffic.UpstreamSuccess:
@@ -99,8 +114,27 @@ func main() {
 
 	// 信号 -> 优雅收尾，顺序确定：
 	// 停止接收新连接 -> guard 拒绝新请求并等待在途完成 -> 关闭 HTTP server。
+	// SIGHUP 单独处理：不重启进程，热加载并重试换配；新配置非法时报错并沿用旧配置。
 	stopCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	hupCh := make(chan os.Signal, 1)
+	if *configPath != "" {
+		signal.Notify(hupCh, syscall.SIGHUP)
+		defer signal.Stop(hupCh)
+	}
+
+	reload := func() {
+		c, err := traffic.LoadConfig(*configPath)
+		if err != nil {
+			logger.l.Error("reload config: parse failed, keeping old config", "err", err)
+			return
+		}
+		if err := guard.UpdateConfig(c); err != nil {
+			logger.l.Error("reload config: invalid config, keeping old config", "err", err)
+			return
+		}
+		logger.l.Info("config reloaded and applied without restart")
+	}
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -111,24 +145,33 @@ func main() {
 		close(serverErr)
 	}()
 
-	select {
-	case err := <-serverErr:
-		if err != nil {
-			log.Fatalf("http server: %v", err)
+	// 等待：期间可反复 SIGHUP 热加载；收到停止信号或 server 退出则进入收尾。
+	stopping := false
+	for !stopping {
+		select {
+		case err := <-serverErr:
+			if err != nil {
+				log.Fatalf("http server: %v", err)
+			}
+			stopping = true
+		case <-hupCh:
+			logger.l.Info("SIGHUP received, reloading config")
+			reload()
+		case <-stopCtx.Done():
+			logger.l.Info("stop signal received, beginning graceful shutdown")
+			stopping = true
 		}
-	case <-stopCtx.Done():
-		logger.l.Info("stop signal received, beginning graceful shutdown")
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownTO)
-		defer cancel()
-
-		// 先让 guard 进入收尾：新请求得到 503(closing)，在途请求继续跑完。
-		if err := guard.Shutdown(shutdownCtx); err != nil {
-			logger.l.Error("guard shutdown timed out", "err", err)
-		}
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			logger.l.Error("http server shutdown error", "err", err)
-		}
-		logger.l.Info("shutdown complete", "in_flight", guard.GlobalInFlight())
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownTO)
+	defer cancel()
+
+	// 先让 guard 进入收尾：新请求得到 503(closing)，在途请求继续跑完。
+	if err := guard.Shutdown(shutdownCtx); err != nil {
+		logger.l.Error("guard shutdown timed out", "err", err)
+	}
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.l.Error("http server shutdown error", "err", err)
+	}
+	logger.l.Info("shutdown complete", "in_flight", guard.GlobalInFlight())
 }

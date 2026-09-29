@@ -1,0 +1,22 @@
+{
+  "rate_per_sec": 100,
+  "burst": 20,
+  "burst_window_ms": 100,
+  "global_in_flight": 1000,
+  "failure_threshold": 5,
+  "open_cooldown_ms": 5000,
+  "upstream_timeout_ms": 2000,
+  "endpoint_costs": {
+    "/report/export": 8,
+    "/report/query": 2
+  },
+  "groups": {
+    "tenant-a": { "rate_per_sec": 40, "burst": 10, "in_flight": 200 },
+    "tenant-b": { "rate_per_sec": 60, "burst": 15, "in_flight": 300 }
+  },
+  "client_groups": {
+    "client-1": "tenant-a",
+    "client-2": "tenant-a",
+    "client-3": "tenant-b"
+  }
+}

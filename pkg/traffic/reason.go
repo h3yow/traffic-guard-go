@@ -7,11 +7,14 @@ type DenyReason string
 
 const (
 	ReasonNone           DenyReason = ""
-	ReasonBurstExceeded  DenyReason = "burst_exceeded"  // 突发窗额度耗尽
-	ReasonRateExceeded   DenyReason = "rate_exceeded"   // 速率窗放行量超上限
-	ReasonGlobalExceeded DenyReason = "global_exceeded" // 全局在途总量达上限
-	ReasonClosing        DenyReason = "closing"         // 进程收尾中，不新开请求
-	ReasonCircuitOpen    DenyReason = "circuit_open"    // 熔断打开，快速失败
+	ReasonBurstExceeded  DenyReason = "burst_exceeded"        // 客户端突发窗成本耗尽
+	ReasonRateExceeded   DenyReason = "rate_exceeded"         // 客户端速率窗累计成本超上限
+	ReasonGlobalExceeded DenyReason = "global_exceeded"       // 全局在途成本总量达上限
+	ReasonGroupBurst     DenyReason = "group_burst_exceeded"  // 分组突发窗成本耗尽
+	ReasonGroupRate      DenyReason = "group_rate_exceeded"   // 分组速率窗累计成本超上限
+	ReasonGroupInFlight  DenyReason = "group_in_flight_limit" // 分组在途成本总量达上限
+	ReasonClosing        DenyReason = "closing"               // 进程收尾中，不新开请求
+	ReasonCircuitOpen    DenyReason = "circuit_open"          // 熔断打开，快速失败
 )
 
 // UpstreamClass 归一化的上游结论类别。
