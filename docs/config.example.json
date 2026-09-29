@@ -1,0 +1,36 @@
+{
+  "rate_per_sec": 100,
+  "burst": 20,
+  "burst_window_ms": 100,
+  "global_in_flight": 1000,
+  "failure_threshold": 5,
+  "open_cooldown_ms": 5000,
+  "upstream_timeout_ms": 2000,
+
+  "endpoint_costs": {
+    "/v1/query": 1,
+    "/v1/aggregate": 5,
+    "/v1/bulk-export": 10
+  },
+
+  "groups": {
+    "enterprise": {
+      "rate_per_sec": 200,
+      "burst": 40,
+      "in_flight": 300,
+      "burst_window_ms": 100
+    },
+    "standard": {
+      "rate_per_sec": 50,
+      "burst": 10,
+      "in_flight": 80,
+      "burst_window_ms": 100
+    }
+  },
+
+  "client_groups": {
+    "acme": "enterprise",
+    "globex": "enterprise",
+    "initech": "standard"
+  }
+}

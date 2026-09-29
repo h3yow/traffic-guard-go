@@ -13,8 +13,9 @@ import (
 
 // UpstreamRequest 一次上游调用的输入。
 type UpstreamRequest struct {
-	Client string
-	ID     string
+	Client   string
+	Endpoint string
+	ID       string
 }
 
 // Outcome 归一化后的上游调用结论（绝不透出原始错误）。

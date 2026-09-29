@@ -149,6 +149,17 @@ func (b *Breaker) State() BreakerState {
 	return b.state
 }
 
+// Update 在运行期调整阈值与冷却时长（配合 Config Reload）。
+// 不重置当前状态与连续失败计数：调用方必须保证参数 > 0（由 Config.Validate 保证）。
+// 若熔断器处于 open，冷却截止点按新冷却时长从原打开时刻重新计算，
+// 使“冷却还剩多久”在切换后立刻确定、可解释。
+func (b *Breaker) Update(threshold int, cooldown time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.threshold = threshold
+	b.cooldown = cooldown
+}
+
 // Snapshot 返回当前状态视图。
 func (b *Breaker) Snapshot() BreakerSnapshot {
 	b.mu.Lock()

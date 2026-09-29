@@ -31,6 +31,22 @@ func testCfg() Config {
 	}
 }
 
+// testCfgNoGroupLayer 返回“分组层不构成额外约束”的配置：
+// 缺省分组的三层额度都放宽到不小于全局，用于复现旧版本
+// “只有客户端 + 全局两层”的测试口径。
+func testCfgNoGroupLayer() Config {
+	cfg := testCfg()
+	cfg.Groups = map[string]GroupConfig{
+		DefaultGroup: {
+			RatePerSec:    1_000_000,
+			Burst:         1_000_000,
+			InFlight:      1_000_000,
+			BurstWindowMS: 100,
+		},
+	}
+	return cfg
+}
+
 func denyReason(err error) DenyReason {
 	if err == nil {
 		return ReasonNone
@@ -41,19 +57,19 @@ func denyReason(err error) DenyReason {
 func TestLimiterBurstThenRateThenRecovery(t *testing.T) {
 	clk := newFakeClock()
 	lg := tlog{t}
-	l := NewLimiter(testCfg(), clk.now)
+	l := NewLimiter(testCfgNoGroupLayer(), clk.now)
 
 	var releases []func()
 	admit := func(client string, want DenyReason) {
 		t.Helper()
-		snap, rel, err := l.Admit(client)
+		snap, adm, err := l.Admit(client, "")
 		lg.Printf("ADMIT request{client=%s} verdict=%s | %s", client, denyReason(err), snap.Explain())
 		if got := denyReason(err); got != want {
 			t.Fatalf("client=%s at=%s: reason = %q, want %q",
 				client, clk.now().Format(time.RFC3339Nano), got, want)
 		}
 		if want == ReasonNone {
-			releases = append(releases, rel)
+			releases = append(releases, adm.Release)
 		}
 	}
 
@@ -103,7 +119,7 @@ func TestLimiterBurstThenRateThenRecovery(t *testing.T) {
 		t.Fatalf("global in flight after release = %d, want 0", got)
 	}
 	clk.advance(1 * time.Second)
-	if _, _, err := l.Admit("cleanup-probe"); err != nil {
+	if _, _, err := l.Admit("cleanup-probe", ""); err != nil {
 		t.Fatalf("fresh client must be admitted: %v", err)
 	}
 	if got := l.ActiveClients(); got != 1 {
@@ -113,30 +129,30 @@ func TestLimiterBurstThenRateThenRecovery(t *testing.T) {
 
 func TestLimiterGlobalCap(t *testing.T) {
 	clk := newFakeClock()
-	cfg := testCfg()
+	cfg := testCfgNoGroupLayer()
 	cfg.RatePerSec = 1000
 	cfg.Burst = 1000
 	cfg.GlobalInFlight = 2
 	l := NewLimiter(cfg, clk.now)
 
-	_, r1, err := l.Admit("a")
+	_, a1, err := l.Admit("a", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, r2, err := l.Admit("b")
+	_, a2, err := l.Admit("b", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := l.Admit("c"); denyReason(err) != ReasonGlobalExceeded {
+	if _, _, err := l.Admit("c", ""); denyReason(err) != ReasonGlobalExceeded {
 		t.Fatalf("third concurrent client should hit global cap: %v", err)
 	}
-	r1()
-	_, r3, err := l.Admit("c")
+	a1.Release()
+	_, a3, err := l.Admit("c", "")
 	if err != nil {
 		t.Fatalf("freed global slot must be reusable: %v", err)
 	}
-	r2()
-	r3()
+	a2.Release()
+	a3.Release()
 	if l.GlobalInFlight() != 0 {
 		t.Fatalf("in flight = %d, want 0", l.GlobalInFlight())
 	}
@@ -145,9 +161,9 @@ func TestLimiterGlobalCap(t *testing.T) {
 func TestLimiterRejectedRequestsNotCounted(t *testing.T) {
 	clk := newFakeClock()
 	lg := tlog{t}
-	l := NewLimiter(testCfg(), clk.now)
+	l := NewLimiter(testCfgNoGroupLayer(), clk.now)
 	for i := 0; i < 50; i++ {
-		snap, _, err := l.Admit("c")
+		snap, _, err := l.Admit("c", "")
 		if i < 3 {
 			if err != nil {
 				t.Fatalf("request %d must pass: %v", i, err)
@@ -168,13 +184,13 @@ func TestLimiterRejectedRequestsNotCounted(t *testing.T) {
 
 func TestLimiterReleaseIsOnceOnly(t *testing.T) {
 	clk := newFakeClock()
-	l := NewLimiter(testCfg(), clk.now)
-	_, rel, err := l.Admit("c")
+	l := NewLimiter(testCfgNoGroupLayer(), clk.now)
+	_, adm, err := l.Admit("c", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rel()
-	rel() // 重复归还不得造成负数/重复计数
+	adm.Release()
+	adm.Release() // 重复归还不得造成负数/重复计数
 	if got := l.GlobalInFlight(); got != 0 {
 		t.Fatalf("double release corrupted count: %d", got)
 	}
@@ -185,7 +201,7 @@ func TestLimiterReleaseIsOnceOnly(t *testing.T) {
 // 每个请求都必须得到稳定一致的结论之一。
 func TestLimiterConcurrentNeverOverAdmit(t *testing.T) {
 	clk := newFakeClock()
-	cfg := testCfg()
+	cfg := testCfgNoGroupLayer()
 	cfg.RatePerSec = 50
 	cfg.Burst = 50
 	cfg.GlobalInFlight = 10
@@ -206,7 +222,7 @@ func TestLimiterConcurrentNeverOverAdmit(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perWorker; i++ {
-				snap, rel, err := l.Admit("shared-client")
+				snap, adm, err := l.Admit("shared-client", "")
 				if err != nil {
 					switch denyReason(err) {
 					case ReasonBurstExceeded:
@@ -229,7 +245,7 @@ func TestLimiterConcurrentNeverOverAdmit(t *testing.T) {
 				lg.Printf("CONCURRENT ALLOW n=%d in_flight=%d/%d | %s",
 					n, inFlight, cfg.GlobalInFlight, snap.Explain())
 				<-hold // 持有额度，制造高并发在途洪峰
-				rel()
+				adm.Release()
 			}
 		}()
 	}

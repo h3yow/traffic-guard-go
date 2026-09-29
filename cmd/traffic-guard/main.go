@@ -24,6 +24,20 @@ func (s slogLogger) Printf(format string, args ...any) {
 	s.l.Info(fmt.Sprintf(format, args...))
 }
 
+// isQuotaDeny 判定是否为任一额度层（客户端/分组/全局）的拒绝结论。
+func isQuotaDeny(r traffic.DenyReason) bool {
+	switch r {
+	case traffic.ReasonBurstExceeded,
+		traffic.ReasonRateExceeded,
+		traffic.ReasonGlobalExceeded,
+		traffic.ReasonGroupBurstExceeded,
+		traffic.ReasonGroupRateExceeded,
+		traffic.ReasonGroupInFlightExceed:
+		return true
+	}
+	return false
+}
+
 func main() {
 	var (
 		configPath = flag.String("config", "", "JSON 配置文件路径（缺省使用内置默认配置）")
@@ -70,11 +84,17 @@ func main() {
 		if client == "" {
 			client = r.RemoteAddr
 		}
+		// 入口名默认取 URL 路径，可由 X-Endpoint 显式声明以匹配成本表；
+		// 未在 endpoint_costs 中声明的入口一律按成本 1 计费。
+		endpoint := r.Header.Get("X-Endpoint")
+		if endpoint == "" {
+			endpoint = r.URL.Path
+		}
 		id := r.Header.Get("X-Request-ID")
 		if id == "" {
 			id = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
-		res := guard.Serve(r.Context(), client, id)
+		res := guard.Serve(r.Context(), client, endpoint, id)
 		switch {
 		case res.Reason == traffic.ReasonClosing:
 			w.Header().Set("X-Deny-Reason", string(res.Reason))
@@ -82,9 +102,7 @@ func main() {
 		case res.Reason == traffic.ReasonCircuitOpen:
 			w.Header().Set("X-Deny-Reason", string(res.Reason))
 			http.Error(w, "circuit open", http.StatusServiceUnavailable)
-		case res.Reason == traffic.ReasonBurstExceeded ||
-			res.Reason == traffic.ReasonRateExceeded ||
-			res.Reason == traffic.ReasonGlobalExceeded:
+		case isQuotaDeny(res.Reason):
 			w.Header().Set("X-Deny-Reason", string(res.Reason))
 			http.Error(w, "rate limited: "+string(res.Reason), http.StatusTooManyRequests)
 		case res.Upstream != traffic.UpstreamSuccess:
@@ -97,10 +115,60 @@ func main() {
 
 	srv := &http.Server{Addr: *listen, Handler: mux}
 
+	// reloadFromFile 重新读取并校验配置文件：
+	// 合法 -> 不断服务、不重启进程地让新额度生效；
+	// 非法 -> 返回错误，guard 继续沿用旧配置（已在途请求不受影响）。
+	reloadFromFile := func(reason string) error {
+		if *configPath == "" {
+			return fmt.Errorf("no -config file given; runtime reload requires a config path")
+		}
+		newCfg, err := traffic.LoadConfig(*configPath)
+		if err != nil {
+			logger.l.Error("config reload rejected, keeping old config",
+				"reason", reason, "path", *configPath, "err", err)
+			return err
+		}
+		if err := guard.Reload(newCfg); err != nil {
+			logger.l.Error("config reload rejected, keeping old config",
+				"reason", reason, "path", *configPath, "err", err)
+			return err
+		}
+		logger.l.Info("config reloaded and applied",
+			"reason", reason, "path", *configPath,
+			"global_in_flight", newCfg.GlobalInFlight,
+			"rate_per_sec", newCfg.RatePerSec, "burst", newCfg.Burst)
+		return nil
+	}
+
+	// 管理入口：POST /admin/reload 从配置文件热加载，便于脚本化验证
+	// （成功 200；读不到/校验失败 400，线上额度保持不变）。
+	mux.HandleFunc("/admin/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := reloadFromFile("http"); err != nil {
+			http.Error(w, "reload rejected, old config still active: "+err.Error(),
+				http.StatusBadRequest)
+			return
+		}
+		fmt.Fprintln(w, "reloaded")
+	})
+
+	// SIGHUP -> 热加载配置文件；SIGINT/SIGTERM -> 优雅收尾。
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	go func() {
+		for range hupCh {
+			_ = reloadFromFile("sighup")
+		}
+	}()
+
 	// 信号 -> 优雅收尾，顺序确定：
 	// 停止接收新连接 -> guard 拒绝新请求并等待在途完成 -> 关闭 HTTP server。
 	stopCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	defer signal.Stop(hupCh)
 
 	serverErr := make(chan error, 1)
 	go func() {
