@@ -29,14 +29,19 @@ type Result struct {
 //  1. 收尾判定（closing -> 直接拒绝，不新开）
 //  2. 熔断判定（open -> 快速失败，不占用任何额度）
 //  3. 客户端突发窗加权额度
-//  4. 分组突发窗加权额度
+//  4. 分组突发窗加权额度（仅归属显式分组的客户端，下同）
 //  5. 客户端速率窗加权额度
 //  6. 分组速率窗加权额度
 //  7. 分组在途加权总量
 //  8. 全局在途加权总量
 //  9. 调用上游（带超时），归一化错误并更新熔断
 //
-// 10. 无论上游成败，精确归还三层在途额度（每个受理请求有且仅有一次）
+// 10. 无论上游成败，精确归还各参与层在途额度（每个受理请求有且仅有一次）
+//
+// 不归属任何显式分组的客户端（未配置 groups 的老配置即此口径）跳过 4/6/7：
+// 只受自身突发窗、自身速率窗与第 8 步全局在途总闸约束。因此一个客户端把
+// 自己的突发/速率用满，不会牵连其他客户端；只有全局在途真正占满才会影响
+// 所有人，且此时拒绝原因确定为 global_exceeded，不会落在并不存在的分组层。
 type Guard struct {
 	up  Upstream
 	log Logger
@@ -155,9 +160,9 @@ func (g *Guard) Serve(ctx context.Context, client, endpoint, id string) Result {
 		return res
 	}
 
-	// 2) 三层六类加权额度核算；任一失败都不产生计数，熔断状态不变（未调用上游）。
-	// 分组归属与本次成本在 Admit 内部按当前配置解析，并在 Admission 中固化，
-	// 即使 Reload 也不影响其收尾口径。
+	// 2) 加权额度核算；任一失败都不产生计数，熔断状态不变（未调用上游）。
+	// 分组归属、是否经过分组层与本次成本在 Admit 内部按当前配置解析，
+	// 并在 Admission 中固化，即使 Reload 也不影响其收尾口径。
 	snap, adm, err := g.limiter.Admit(client, endpoint)
 	if err != nil {
 		de := err.(*DenyError)
@@ -175,7 +180,7 @@ func (g *Guard) Serve(ctx context.Context, client, endpoint, id string) Result {
 		return res
 	}
 
-	// 3) 已受理：三层在途额度有且仅有一次归还；即使下游 panic 也不允许漏计。
+	// 3) 已受理：各参与层在途额度有且仅有一次归还；即使下游 panic 也不允许漏计。
 	defer adm.Release()
 
 	// 4) 带超时调用上游，并归一化为可区分结论。

@@ -133,11 +133,19 @@ func TestGroupIndependence(t *testing.T) {
 	if _, _, err := l.Admit("b", ""); denyReason(err) != ReasonGroupInFlightExceed {
 		t.Fatalf("g1 must stay saturated independently, got %v", err)
 	}
-	// 缺省分组同样独立。
+	// 未映射的“缺省”客户端不归属任何显式分组：不经过分组层，
+	// 不占用任何分组在途计数器，各客户端彼此独立，只受全局总闸约束。
 	d := mustAdmit(t, l, "outsider", "")
-	if got := l.GroupInFlight(DefaultGroup); got != 1 {
-		t.Fatalf("default group in-flight = %d want 1", got)
+	d2 := mustAdmit(t, l, "outsider-2", "")
+	if got := l.GroupInFlight(DefaultGroup); got != 0 {
+		t.Fatalf("default (group_layer=off) clients must not touch a group counter, got %d", got)
 	}
+	if snap := d2.Snapshot(); snap.GroupLayer {
+		t.Fatalf("unmapped client must skip the group layer: %s", snap.Explain())
+	}
+	// 两个分组都打满，也不影响缺省口径客户端的自身额度判断
+	// （这里全局=100 很宽松，所以 outsider-2 连续突发额度内继续可入）。
+	d3 := mustAdmit(t, l, "outsider-2", "")
 	for _, x := range g1 {
 		x.Release()
 	}
@@ -145,6 +153,8 @@ func TestGroupIndependence(t *testing.T) {
 		x.Release()
 	}
 	d.Release()
+	d2.Release()
+	d3.Release()
 	if l.GlobalInFlight() != 0 {
 		t.Fatalf("leak: %d", l.GlobalInFlight())
 	}

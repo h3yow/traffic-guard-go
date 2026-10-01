@@ -35,13 +35,16 @@ type Config struct {
 	EndpointCosts map[string]int `json:"endpoint_costs,omitempty"`
 
 	// Groups 分组（租户）维度额度，key 为分组名。
-	// 特殊 key "" 是缺省分组（未配置时隐式存在，额度等于全局/客户端顶层字段）；
-	// 未命中 ClientGroups 映射、或映射到不存在分组的客户端一律进入缺省分组。
+	// 只有在本表里显式声明的分组才构成共享租户层：
+	// 同组客户端共享该组的速率/突发/在途三层额度。
+	// 特殊 key "" 是缺省分组：显式声明时，未命中归属（或显式归属到 ""）
+	// 的客户端共享该组额度；不声明时，这些客户端不经过任何分组层，
+	// 回到“各客户端独立核算 + 全局在途总闸”的旧版本口径。
 	Groups map[string]GroupConfig `json:"groups,omitempty"`
 
 	// ClientGroups 客户端 -> 分组归属映射。
 	// key 为客户端标识（不允许空串），value 必须是 Groups 中存在的分组名
-	// （缺省分组名 "" 可以显式书写）。
+	// （缺省分组名 "" 可以显式书写）。未出现在映射中的客户端不归属任何分组。
 	ClientGroups map[string]string `json:"client_groups,omitempty"`
 }
 
@@ -221,7 +224,9 @@ func (c Config) EndpointCost(endpoint string) int {
 }
 
 // ClientGroup 返回客户端归属的分组名；未映射或映射缺省时为 DefaultGroup。
-// 注意：Validate 保证映射目标分组存在；对未校验配置的直接调用同样安全回落。
+// 注意：返回 DefaultGroup 只代表“名义归属”，该客户端是否真正受分组层约束，
+// 取决于缺省分组是否被显式配置（见 HasExplicitGroup）。
+// Validate 保证映射目标分组存在；对未校验配置的直接调用同样安全回落。
 func (c Config) ClientGroup(client string) string {
 	if g, ok := c.ClientGroups[client]; ok {
 		if _, exists := c.Groups[g]; exists {
@@ -239,10 +244,20 @@ func (c Config) GroupBurstWindow(group string) time.Duration {
 	return c.BurstWindow()
 }
 
-// ResolveGroup 返回分组生效的三层额度与突发窗。
-// 缺省分组未显式声明时，速率/突发/在途分别继承顶层
-// rate_per_sec/burst/global_in_flight，形成“只有一个隐式大分组”的
-// 旧版本口径，保证向后兼容。
+// HasExplicitGroup 报告 group 是否在 groups 中被显式配置。
+// 只有显式分组才作为真正的共享租户层参与核算；
+// 未显式声明的缺省分组（DefaultGroup）不构成共享层——
+// 落入其中的客户端回到“各客户端独立 + 全局在途总闸”的旧版本口径。
+func (c Config) HasExplicitGroup(group string) bool {
+	_, ok := c.Groups[group]
+	return ok
+}
+
+// ResolveGroup 返回“显式分组”生效的三层额度与突发窗。
+// 仅当 HasExplicitGroup(group) 为真时，返回值才代表一层实际生效的共享约束；
+// 缺省分组未显式声明时，返回的继承值（rate_per_sec/burst/global_in_flight）
+// 只用于观测展示，不会被准入核算使用——未归属任何显式分组的客户端之间
+// 不共享速率/突发/在途额度，保持旧版本口径。
 func (c Config) ResolveGroup(group string) GroupConfig {
 	if g, ok := c.Groups[group]; ok {
 		return g
