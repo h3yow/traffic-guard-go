@@ -35,8 +35,11 @@ type Config struct {
 	EndpointCosts map[string]int `json:"endpoint_costs,omitempty"`
 
 	// Groups 分组（租户）维度额度，key 为分组名。
-	// 特殊 key "" 是缺省分组（未配置时隐式存在，额度等于全局/客户端顶层字段）；
-	// 未命中 ClientGroups 映射、或映射到不存在分组的客户端一律进入缺省分组。
+	// 只有“显式配置”的分组（含显式写出的缺省分组 ""）才会对其成员施加
+	// 分组层的速率/突发/在途约束；未命中 ClientGroups 映射、或映射到不存在
+	// 分组的客户端一律归入缺省分组 ""——当 "" 未被显式配置时，这些客户端
+	// 不经过任何分组层检查，保持“每客户端独立窗口 + 全局在途总闸”的旧口径，
+	// 客户端之间不会互相挤占额度。
 	Groups map[string]GroupConfig `json:"groups,omitempty"`
 
 	// ClientGroups 客户端 -> 分组归属映射。
@@ -239,10 +242,18 @@ func (c Config) GroupBurstWindow(group string) time.Duration {
 	return c.BurstWindow()
 }
 
+// GroupConfigured 报告分组名是否在 groups 中被显式配置。
+// 只有显式配置的分组（含显式写出的缺省分组 ""）才对成员施加分组层约束；
+// 否则该分组的客户端只受“自身窗口 + 全局在途”约束（旧版本口径）。
+func (c Config) GroupConfigured(group string) bool {
+	_, ok := c.Groups[group]
+	return ok
+}
+
 // ResolveGroup 返回分组生效的三层额度与突发窗。
 // 缺省分组未显式声明时，速率/突发/在途分别继承顶层
-// rate_per_sec/burst/global_in_flight，形成“只有一个隐式大分组”的
-// 旧版本口径，保证向后兼容。
+// rate_per_sec/burst/global_in_flight——注意：这些继承值仅用于解释/展示，
+// 未显式配置的分组并不会被强制执行（见 GroupConfigured）。
 func (c Config) ResolveGroup(group string) GroupConfig {
 	if g, ok := c.Groups[group]; ok {
 		return g

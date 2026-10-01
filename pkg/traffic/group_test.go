@@ -133,10 +133,15 @@ func TestGroupIndependence(t *testing.T) {
 	if _, _, err := l.Admit("b", ""); denyReason(err) != ReasonGroupInFlightExceed {
 		t.Fatalf("g1 must stay saturated independently, got %v", err)
 	}
-	// 缺省分组同样独立。
+	// 未映射到任何显式分组的客户端不经过分组层：分组计数器一律不增加，
+	// 它只受自身窗口与全局总闸约束，额度与 g1/g2 完全隔离。
+	before := l.GlobalInFlight()
 	d := mustAdmit(t, l, "outsider", "")
-	if got := l.GroupInFlight(DefaultGroup); got != 1 {
-		t.Fatalf("default group in-flight = %d want 1", got)
+	if got := l.GroupInFlight(DefaultGroup); got != 0 {
+		t.Fatalf("ungrouped client must not touch the default group, got %d", got)
+	}
+	if got := l.GlobalInFlight(); got != before+1 {
+		t.Fatalf("ungrouped client counts only against global: %d want %d", got, before+1)
 	}
 	for _, x := range g1 {
 		x.Release()

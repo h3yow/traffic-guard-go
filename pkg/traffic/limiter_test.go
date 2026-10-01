@@ -31,20 +31,10 @@ func testCfg() Config {
 	}
 }
 
-// testCfgNoGroupLayer 返回“分组层不构成额外约束”的配置：
-// 缺省分组的三层额度都放宽到不小于全局，用于复现旧版本
-// “只有客户端 + 全局两层”的测试口径。
+// testCfgNoGroupLayer 返回“完全没有分组配置”的配置：所有客户端都没有分组归属，
+// 只受自身速率/突发窗 + 全局在途总闸约束，即旧版本（升级前）的口径。
 func testCfgNoGroupLayer() Config {
-	cfg := testCfg()
-	cfg.Groups = map[string]GroupConfig{
-		DefaultGroup: {
-			RatePerSec:    1_000_000,
-			Burst:         1_000_000,
-			InFlight:      1_000_000,
-			BurstWindowMS: 100,
-		},
-	}
-	return cfg
+	return testCfg()
 }
 
 func denyReason(err error) DenyReason {
